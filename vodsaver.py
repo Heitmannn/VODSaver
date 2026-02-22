@@ -116,6 +116,7 @@ def run_yt_dlp(vod_url, cookies_path, out_path: Path, extra_args):
         "yt-dlp",
         "--cookies",
         cookies_path,
+        "--no-write-cookies",
         "-o",
         str(out_path),
         "--merge-output-format",

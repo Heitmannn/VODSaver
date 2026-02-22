@@ -79,4 +79,5 @@ Example host cron entry:
 
 ## Notes
 - `yt-dlp` uses cookies to access subscriber-only VODs. The cookies file must be in Netscape format (exported from your browser), not just a raw token.
+- Cookies are mounted read-only; the script passes `--no-write-cookies` to avoid write errors.
 - Episode numbering uses the day-of-month; seasons are month numbers (`Season 02`).
