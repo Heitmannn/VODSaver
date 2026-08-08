@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime as dt
+import csv
 import fcntl
 import json
 import os
@@ -178,7 +179,6 @@ def run_yt_dlp(vod_url, cookies_path, out_path: Path, extra_args):
         "yt-dlp",
         "--cookies",
         cookies_path,
-        "--no-write-cookies",
         "-o",
         str(out_path),
         "--merge-output-format",
@@ -195,7 +195,9 @@ def normalize_channels(channels_value: str):
 
 
 def normalize_show_names(names_value: str):
-    return [n.strip() for n in names_value.split(",")] if names_value else []
+    if not names_value:
+        return []
+    return [name.strip() for name in next(csv.reader([names_value], skipinitialspace=True))]
 
 
 def resolve_state_path(state_path_env: str, output_dir: Path, channel: str, multi: bool):
@@ -287,6 +289,9 @@ def main():
     show_names_value = env("SHOW_NAMES", default="")
     show_names = normalize_show_names(show_names_value)
     single_show_name = env("SHOW_NAME", default="")
+    if not show_names and len(channels) > 1 and "," in single_show_name:
+        show_names = normalize_show_names(single_show_name)
+        single_show_name = ""
 
     client_id = env("TWITCH_CLIENT_ID", required=True)
     user_token = env("TWITCH_USER_OAUTH_TOKEN", default="")

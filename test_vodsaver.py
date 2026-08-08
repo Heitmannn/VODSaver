@@ -13,6 +13,12 @@ class VODSaverTests(unittest.TestCase):
         self.assertEqual(vodsaver.resolve_show_name("channel", 1, ["First", "Second"], "Legacy"), "Second")
         self.assertEqual(vodsaver.resolve_show_name("channel", 0, [], ""), "channel")
 
+    def test_quoted_comma_separated_show_names(self):
+        names = vodsaver.normalize_show_names('Primeagen,"Michael Reeves"')
+        self.assertEqual(names, ["Primeagen", "Michael Reeves"])
+        self.assertEqual(vodsaver.resolve_show_name("theprimeagen", 0, names), "Primeagen")
+        self.assertEqual(vodsaver.resolve_show_name("michaelreeves", 1, names), "Michael Reeves")
+
     def test_build_paths_uses_channel_month_and_date(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

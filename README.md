@@ -95,7 +95,7 @@ The application lock already prevents overlapping runs. Adding `flock` to cron i
 
 ## Notes
 - `yt-dlp` uses cookies to access subscriber-only VODs. The cookies file must be in Netscape format (exported from your browser), not just a raw token.
-- Cookies are mounted read-only; the script passes `--no-write-cookies` to avoid write errors.
+- Cookies are mounted read-only and are only read by `yt-dlp`.
 - The lock and default state files must live on the persistent `/data/vods` mount.
 - Default output layout is `OUTPUT_DIR/<channel>/<MonthName>/<YYYY-MM-DD>.mp4` (plus matching `.nfo`).
 - Episode title is the date (`YYYY-MM-DD`), season is month number, and episode number is day-of-month.
