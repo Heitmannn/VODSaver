@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import datetime as dt
+import fcntl
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,20 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 API_BASE = "https://api.twitch.tv/helix"
+MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
 
 def env(name, default=None, required=False):
@@ -31,8 +47,23 @@ def load_state(path: Path):
 
 def save_state(path: Path, state: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    with temporary_path.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    temporary_path.replace(path)
+
+
+def acquire_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    return lock_file
 
 
 def get_app_access_token(client_id, client_secret):
@@ -56,7 +87,7 @@ def twitch_get(url, token, client_id, params=None):
     }
     resp = requests.get(url, headers=headers, params=params, timeout=30)
     if resp.status_code == 401:
-        raise SystemExit("Twitch API unauthorized. Check token and Client ID.")
+        raise RuntimeError("Twitch API unauthorized. Check token and Client ID.")
     resp.raise_for_status()
     return resp.json()
 
@@ -64,7 +95,7 @@ def twitch_get(url, token, client_id, params=None):
 def get_user_id(login, token, client_id):
     data = twitch_get(f"{API_BASE}/users", token, client_id, params={"login": login})
     if not data.get("data"):
-        raise SystemExit(f"No Twitch user found for login: {login}")
+        raise RuntimeError(f"No Twitch user found for login: {login}")
     return data["data"][0]["id"]
 
 
@@ -88,18 +119,42 @@ def sanitize_filename(value):
     return value[:180] if value else "untitled"
 
 
-def season_from_date(d: dt.datetime):
-    return f"Season {d.month:02d}"
+def month_name_from_date(d: dt.datetime):
+    return MONTH_NAMES[d.month - 1]
 
 
-def build_paths(output_dir: Path, channel: str, show_name: str, vod_dt: dt.datetime, title: str):
-    season = season_from_date(vod_dt)
-    base_name = f"{vod_dt:%b-%d-%H-%M}"
-    streamer_dir = output_dir / sanitize_filename(channel)
-    show_dir = streamer_dir / sanitize_filename(show_name)
-    season_dir = show_dir / season
-    season_dir.mkdir(parents=True, exist_ok=True)
-    return season_dir, base_name, season, vod_dt
+def resolve_show_dir(output_dir: Path, channel: str, show_name: str):
+    streamer_name = sanitize_filename(channel)
+    show_name_clean = sanitize_filename(show_name)
+    streamer_dir = output_dir / streamer_name
+    if show_name_clean.lower() == streamer_name.lower():
+        return streamer_dir
+    return streamer_dir / show_name_clean
+
+
+def choose_base_name(target_dir: Path, vod_dt: dt.datetime):
+    day_name = vod_dt.strftime("%Y-%m-%d")
+    if not (target_dir / f"{day_name}.mp4").exists() and not (target_dir / f"{day_name}.nfo").exists():
+        return day_name
+
+    dt_name = vod_dt.strftime("%Y-%m-%d-%H-%M")
+    if not (target_dir / f"{dt_name}.mp4").exists() and not (target_dir / f"{dt_name}.nfo").exists():
+        return dt_name
+
+    for suffix in range(2, 1000):
+        candidate = f"{dt_name}-{suffix}"
+        if not (target_dir / f"{candidate}.mp4").exists() and not (target_dir / f"{candidate}.nfo").exists():
+            return candidate
+    raise RuntimeError(f"Could not find free filename in {target_dir}")
+
+
+def build_paths(output_dir: Path, channel: str, show_name: str, vod_dt: dt.datetime):
+    month_name = month_name_from_date(vod_dt)
+    show_dir = resolve_show_dir(output_dir, channel, show_name)
+    month_dir = show_dir / month_name
+    month_dir.mkdir(parents=True, exist_ok=True)
+    base_name = choose_base_name(month_dir, vod_dt)
+    return month_dir, base_name, vod_dt.month, vod_dt.day
 
 
 def write_nfo(nfo_path: Path, title: str, description: str, aired: dt.date, season: int, episode: int):
@@ -158,11 +213,13 @@ def resolve_state_path(state_path_env: str, output_dir: Path, channel: str, mult
     return base / f"{channel}.json"
 
 
-def resolve_show_name(channel: str, index: int, show_names: list):
+def resolve_show_name(channel: str, index: int, show_names: list, single_show_name: str = ""):
     if index < len(show_names):
         candidate = show_names[index].strip()
         if candidate:
             return candidate
+    if single_show_name.strip():
+        return single_show_name.strip()
     return channel
 
 
@@ -197,16 +254,18 @@ def process_channel(
     published_at = latest["published_at"].replace("Z", "+00:00")
     vod_dt = dt.datetime.fromisoformat(published_at).astimezone()
 
-    season_dir, base_name, season_label, _ = build_paths(output_dir, channel, show_name, vod_dt, vod_title)
-    video_path = season_dir / f"{base_name}.mp4"
-    nfo_path = season_dir / f"{base_name}.nfo"
+    month_dir, base_name, season_num, episode_num = build_paths(output_dir, channel, show_name, vod_dt)
+    video_path = month_dir / f"{base_name}.mp4"
+    nfo_path = month_dir / f"{base_name}.nfo"
 
     print(f"Downloading VOD {vod_id} for {channel} to {video_path}...")
     run_yt_dlp(vod_url, cookies_path, video_path, extra_args)
 
-    season_num = int(season_label.split()[-1])
-    episode_num = vod_dt.day
-    write_nfo(nfo_path, vod_title, latest.get("description", ""), vod_dt.date(), season_num, episode_num)
+    episode_title = vod_dt.strftime("%Y-%m-%d")
+    description = latest.get("description", "")
+    if vod_title and vod_title != episode_title:
+        description = f"{vod_title}\n\n{description}" if description else vod_title
+    write_nfo(nfo_path, episode_title, description, vod_dt.date(), season_num, episode_num)
 
     state["last_vod_id"] = vod_id
     state["last_vod_published_at"] = latest["published_at"]
@@ -227,44 +286,54 @@ def main():
 
     show_names_value = env("SHOW_NAMES", default="")
     show_names = normalize_show_names(show_names_value)
+    single_show_name = env("SHOW_NAME", default="")
 
     client_id = env("TWITCH_CLIENT_ID", required=True)
-    client_secret = env("TWITCH_CLIENT_SECRET", required=True)
     user_token = env("TWITCH_USER_OAUTH_TOKEN", default="")
+    client_secret = env("TWITCH_CLIENT_SECRET", required=not bool(user_token))
     cookies_path = env("COOKIES_PATH", required=True)
     output_dir = Path(env("OUTPUT_DIR", required=True))
     state_path_env = env("STATE_PATH", default="")
-    extra_args = env("YTDLP_EXTRA_ARGS", default="").split()
+    extra_args = shlex.split(env("YTDLP_EXTRA_ARGS", default=""))
 
     if not Path(cookies_path).exists():
         raise SystemExit(f"Cookies file not found: {cookies_path}")
 
-    if user_token:
-        token = user_token
-    else:
-        token = get_app_access_token(client_id, client_secret)
+    lock_path = Path(env("LOCK_PATH", default=str(output_dir / ".vodsaver.lock")))
+    lock_file = acquire_lock(lock_path)
+    if lock_file is None:
+        print(f"Another VODsaver run holds {lock_path}; skipping this run.")
+        return 0
 
-    multi = len(channels) > 1
-    for index, channel in enumerate(channels):
-        show_name = resolve_show_name(channel, index, show_names)
-        state_path = resolve_state_path(state_path_env, output_dir, channel, multi)
-        try:
-            process_channel(
-                channel=channel,
-                token=token,
-                client_id=client_id,
-                cookies_path=cookies_path,
-                output_dir=output_dir,
-                state_path=state_path,
-                show_name=show_name,
-                extra_args=extra_args,
-            )
-        except Exception as exc:
-            print(f"Error processing {channel}: {exc}")
+    failures = []
+    try:
+        token = user_token or get_app_access_token(client_id, client_secret)
+        multi = len(channels) > 1
+        for index, channel in enumerate(channels):
+            show_name = resolve_show_name(channel, index, show_names, single_show_name)
+            state_path = resolve_state_path(state_path_env, output_dir, channel, multi)
+            try:
+                process_channel(
+                    channel=channel,
+                    token=token,
+                    client_id=client_id,
+                    cookies_path=cookies_path,
+                    output_dir=output_dir,
+                    state_path=state_path,
+                    show_name=show_name,
+                    extra_args=extra_args,
+                )
+            except Exception as exc:
+                failures.append(channel)
+                print(f"Error processing {channel}: {exc}", file=sys.stderr)
+    finally:
+        lock_file.close()
+
+    if failures:
+        print(f"Failed channels: {', '.join(failures)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
+    sys.exit(main())

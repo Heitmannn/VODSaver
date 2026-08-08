@@ -6,8 +6,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt \
-  && pip install --no-cache-dir yt-dlp==2024.08.06
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY vodsaver.py /app/vodsaver.py
 

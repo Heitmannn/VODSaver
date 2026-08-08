@@ -1,0 +1,9 @@
+.git
+.env
+cookies.txt
+cron.log
+state.json
+states/
+media/
+__pycache__/
+*.py[cod]

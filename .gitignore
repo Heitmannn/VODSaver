@@ -1,4 +1,5 @@
 cookies.txt
 .env
 media/*
-
+__pycache__/
+*.py[cod]
